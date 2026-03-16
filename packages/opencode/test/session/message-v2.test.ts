@@ -922,3 +922,132 @@ describe("session.message-v2.fromError", () => {
     })
   })
 })
+
+describe("session.message-v2.filterCompacted rolling window", () => {
+  async function* streamNewestFirst(chronological: MessageV2.WithParts[]): AsyncIterable<MessageV2.WithParts> {
+    for (const msg of [...chronological].reverse()) {
+      yield msg
+    }
+  }
+
+  test("excludes messages with compacted field", async () => {
+    const compactedUser: MessageV2.WithParts = {
+      info: { ...userInfo("u1"), compacted: { at: 100, summaryID: "rs1" } } as unknown as MessageV2.User,
+      parts: [{ ...basePart("u1", "p1"), type: "text", text: "old message" }] as MessageV2.Part[],
+    }
+    const compactedAssistant: MessageV2.WithParts = {
+      info: { ...assistantInfo("a1", "u1"), compacted: { at: 100, summaryID: "rs1" } } as unknown as MessageV2.Assistant,
+      parts: [{ ...basePart("a1", "p2"), type: "text", text: "old response" }] as MessageV2.Part[],
+    }
+    const rollingSummary: MessageV2.WithParts = {
+      info: Object.assign(assistantInfo("rs1", "u1"), { summary: true, rolling: true, finish: "stop" }),
+      parts: [{ ...basePart("rs1", "p3"), type: "text", text: "summary of conversation" }] as MessageV2.Part[],
+    }
+    const user2: MessageV2.WithParts = {
+      info: userInfo("u2"),
+      parts: [{ ...basePart("u2", "p4"), type: "text", text: "new question" }] as MessageV2.Part[],
+    }
+    const assistant2: MessageV2.WithParts = {
+      info: assistantInfo("a2", "u2"),
+      parts: [{ ...basePart("a2", "p5"), type: "text", text: "new response" }] as MessageV2.Part[],
+    }
+
+    const chronological = [compactedUser, compactedAssistant, rollingSummary, user2, assistant2]
+    const result = await MessageV2.filterCompacted(streamNewestFirst(chronological))
+
+    expect(result.length).toBe(3)
+    expect(result[0].info.id).toBe("rs1")
+    expect(result[1].info.id).toBe("u2")
+    expect(result[2].info.id).toBe("a2")
+  })
+
+  test("repositions rolling summary to index 0", async () => {
+    const user0: MessageV2.WithParts = {
+      info: userInfo("u0"),
+      parts: [{ ...basePart("u0", "p0"), type: "text", text: "first message" }] as MessageV2.Part[],
+    }
+    const assistant0: MessageV2.WithParts = {
+      info: assistantInfo("a0", "u0"),
+      parts: [{ ...basePart("a0", "p1"), type: "text", text: "first response" }] as MessageV2.Part[],
+    }
+    const compactedUser: MessageV2.WithParts = {
+      info: { ...userInfo("u1"), compacted: { at: 100, summaryID: "rs1" } } as unknown as MessageV2.User,
+      parts: [{ ...basePart("u1", "p2"), type: "text", text: "compacted msg" }] as MessageV2.Part[],
+    }
+    const compactedAssistant: MessageV2.WithParts = {
+      info: { ...assistantInfo("a1", "u1"), compacted: { at: 100, summaryID: "rs1" } } as unknown as MessageV2.Assistant,
+      parts: [{ ...basePart("a1", "p3"), type: "text", text: "compacted response" }] as MessageV2.Part[],
+    }
+    const rollingSummary: MessageV2.WithParts = {
+      info: Object.assign(assistantInfo("rs1", "u0"), { summary: true, rolling: true, finish: "stop" }),
+      parts: [{ ...basePart("rs1", "p4"), type: "text", text: "rolling summary" }] as MessageV2.Part[],
+    }
+    const user2: MessageV2.WithParts = {
+      info: userInfo("u2"),
+      parts: [{ ...basePart("u2", "p5"), type: "text", text: "recent message" }] as MessageV2.Part[],
+    }
+    const assistant2: MessageV2.WithParts = {
+      info: assistantInfo("a2", "u2"),
+      parts: [{ ...basePart("a2", "p6"), type: "text", text: "recent response" }] as MessageV2.Part[],
+    }
+
+    const chronological = [user0, assistant0, compactedUser, compactedAssistant, rollingSummary, user2, assistant2]
+    const result = await MessageV2.filterCompacted(streamNewestFirst(chronological))
+
+    expect(result.length).toBe(5)
+    expect(result[0].info.id).toBe("rs1")
+    expect(result[1].info.id).toBe("u0")
+    expect(result[2].info.id).toBe("a0")
+    expect(result[3].info.id).toBe("u2")
+    expect(result[4].info.id).toBe("a2")
+  })
+
+  test("behavior unchanged when no rolling summary exists", async () => {
+    const user1: MessageV2.WithParts = {
+      info: userInfo("u1"),
+      parts: [{ ...basePart("u1", "p1"), type: "text", text: "hello" }] as MessageV2.Part[],
+    }
+    const assistant1: MessageV2.WithParts = {
+      info: assistantInfo("a1", "u1"),
+      parts: [{ ...basePart("a1", "p2"), type: "text", text: "hi" }] as MessageV2.Part[],
+    }
+    const user2: MessageV2.WithParts = {
+      info: userInfo("u2"),
+      parts: [{ ...basePart("u2", "p3"), type: "text", text: "question" }] as MessageV2.Part[],
+    }
+    const assistant2: MessageV2.WithParts = {
+      info: assistantInfo("a2", "u2"),
+      parts: [{ ...basePart("a2", "p4"), type: "text", text: "answer" }] as MessageV2.Part[],
+    }
+
+    const chronological = [user1, assistant1, user2, assistant2]
+    const result = await MessageV2.filterCompacted(streamNewestFirst(chronological))
+
+    expect(result.length).toBe(4)
+    expect(result[0].info.id).toBe("u1")
+    expect(result[1].info.id).toBe("a1")
+    expect(result[2].info.id).toBe("u2")
+    expect(result[3].info.id).toBe("a2")
+  })
+
+  test("returns only rolling summary when all other messages are compacted", async () => {
+    const compactedUser: MessageV2.WithParts = {
+      info: { ...userInfo("u1"), compacted: { at: 100, summaryID: "rs1" } } as unknown as MessageV2.User,
+      parts: [{ ...basePart("u1", "p1"), type: "text", text: "compacted" }] as MessageV2.Part[],
+    }
+    const compactedAssistant: MessageV2.WithParts = {
+      info: { ...assistantInfo("a1", "u1"), compacted: { at: 100, summaryID: "rs1" } } as unknown as MessageV2.Assistant,
+      parts: [{ ...basePart("a1", "p2"), type: "text", text: "compacted" }] as MessageV2.Part[],
+    }
+    const rollingSummary: MessageV2.WithParts = {
+      info: Object.assign(assistantInfo("rs1", "u1"), { summary: true, rolling: true, finish: "stop" }),
+      parts: [{ ...basePart("rs1", "p3"), type: "text", text: "summary" }] as MessageV2.Part[],
+    }
+
+    const chronological = [compactedUser, compactedAssistant, rollingSummary]
+    const result = await MessageV2.filterCompacted(streamNewestFirst(chronological))
+
+    expect(result.length).toBe(1)
+    expect(result[0].info.id).toBe("rs1")
+  })
+})

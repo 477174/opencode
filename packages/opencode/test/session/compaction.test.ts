@@ -6,7 +6,9 @@ import { Instance } from "../../src/project/instance"
 import { Log } from "../../src/util/log"
 import { tmpdir } from "../fixture/fixture"
 import { Session } from "../../src/session"
+import { Identifier } from "../../src/id/id"
 import type { Provider } from "../../src/provider/provider"
+import type { MessageV2 } from "../../src/session/message-v2"
 
 Log.init({ print: false })
 
@@ -420,4 +422,435 @@ describe("session.getUsage", () => {
       expect(result.tokens.total).toBe(2000)
     },
   )
+})
+
+// ─── Rolling compaction tests ─────────────────────────────────────────────────
+
+describe("session.compaction.shouldRollingCompact", () => {
+  // Model: context=200000, output=32000 (no input limit)
+  // maxOutputTokens = min(32000, 32000) = 32000
+  // usable = 200000 - 32000 = 168000
+  // Default threshold=0.85 → triggerAt = 168000 * 0.85 = 142800
+  // Default target=0.70 → targetTokens = 168000 * 0.70 = 117600
+
+  test("returns needed:false when below threshold", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        const result = await SessionCompaction.shouldRollingCompact({ tokenCount: 140_000, model })
+        expect(result).toEqual({ needed: false })
+      },
+    })
+  })
+
+  test("returns needed:true with token details when above threshold", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        const result = await SessionCompaction.shouldRollingCompact({ tokenCount: 150_000, model })
+        expect(result.needed).toBe(true)
+        if (result.needed) {
+          expect(result.currentTokens).toBe(150_000)
+          expect(result.targetTokens).toBeCloseTo(117_600, 0)
+        }
+      },
+    })
+  })
+
+  test("returns needed:false when mode is full", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({ compaction: { mode: "full" } }),
+        )
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        const result = await SessionCompaction.shouldRollingCompact({ tokenCount: 150_000, model })
+        expect(result).toEqual({ needed: false })
+      },
+    })
+  })
+
+  test("returns needed:false when auto is disabled", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({ compaction: { auto: false } }),
+        )
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        const result = await SessionCompaction.shouldRollingCompact({ tokenCount: 150_000, model })
+        expect(result).toEqual({ needed: false })
+      },
+    })
+  })
+
+  test("returns needed:false when context is 0", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 0, output: 32_000 })
+        const result = await SessionCompaction.shouldRollingCompact({ tokenCount: 150_000, model })
+        expect(result).toEqual({ needed: false })
+      },
+    })
+  })
+
+  test("uses custom threshold and target from config", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({ compaction: { threshold: 0.9, target: 0.6 } }),
+        )
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        // usable = 168000, triggerAt = 168000*0.90 = 151200, target = 168000*0.60 = 100800
+        // 150000 < 151200 → not needed
+        const result = await SessionCompaction.shouldRollingCompact({ tokenCount: 150_000, model })
+        expect(result).toEqual({ needed: false })
+      },
+    })
+  })
+
+  test("falls back to defaults when threshold <= target (invalid config)", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({ compaction: { threshold: 0.5, target: 0.8 } }),
+        )
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        // Invalid → uses defaults: threshold=0.85, target=0.70
+        // triggerAt = 142800, targetTokens = 117600
+        // 150000 >= 142800 → needed
+        const result = await SessionCompaction.shouldRollingCompact({ tokenCount: 150_000, model })
+        expect(result.needed).toBe(true)
+        if (result.needed) {
+          expect(result.currentTokens).toBe(150_000)
+          expect(result.targetTokens).toBeCloseTo(117_600, 0)
+        }
+      },
+    })
+  })
+})
+
+describe("session.compaction.estimateTurnTokens", () => {
+  function textMsg(id: string, text: string): MessageV2.WithParts {
+    return {
+      info: {
+        id,
+        sessionID: "test",
+        role: "user",
+        time: { created: 0 },
+        agent: "test",
+        model: { providerID: "test", modelID: "test" },
+      } as MessageV2.User,
+      parts: [
+        {
+          id: `${id}-p`,
+          sessionID: "test",
+          messageID: id,
+          type: "text",
+          text,
+        } as MessageV2.TextPart,
+      ],
+    }
+  }
+
+  test("estimates tokens for a slice of messages", () => {
+    const messages = [textMsg("m1", "x".repeat(400)), textMsg("m2", "y".repeat(400))]
+    // serializeTurn joins: "x"*400 + "\n" + "y"*400 = 801 chars
+    // Token.estimate uses Math.round(801/4) = Math.round(200.25) = 200
+    expect(SessionCompaction.estimateTurnTokens(messages, 0, 2)).toBe(200)
+  })
+
+  test("returns 0 for empty slice", () => {
+    expect(SessionCompaction.estimateTurnTokens([], 0, 0)).toBe(0)
+  })
+
+  test("estimates tokens for a partial slice", () => {
+    const messages = [textMsg("m1", "a".repeat(100)), textMsg("m2", "b".repeat(200))]
+    // Only second message: "b"*200 = 200 chars → ceil(200/4) = 50
+    expect(SessionCompaction.estimateTurnTokens(messages, 1, 2)).toBe(50)
+  })
+})
+
+describe("session.compaction.getOverflowStrategy", () => {
+  // Model: context=100000, output=32000
+  // usable = 100000 - 32000 = 68000
+  // Overflow tokens: input=60000 + output=10000 = 70000 >= 68000
+  // Safe tokens: input=50000 + output=10000 = 60000 < 68000
+
+  test("returns 'none' when no overflow", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 100_000, output: 32_000 })
+        const tokens = { input: 50_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
+        const result = await SessionCompaction.getOverflowStrategy({ tokens, model })
+        expect(result).toBe("none")
+      },
+    })
+  })
+
+  test("returns 'rolling' when overflow with default config", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 100_000, output: 32_000 })
+        const tokens = { input: 60_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
+        const result = await SessionCompaction.getOverflowStrategy({ tokens, model })
+        expect(result).toBe("rolling")
+      },
+    })
+  })
+
+  test("returns 'full' when overflow with mode=full config", async () => {
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({ compaction: { mode: "full" } }),
+        )
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 100_000, output: 32_000 })
+        const tokens = { input: 60_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
+        const result = await SessionCompaction.getOverflowStrategy({ tokens, model })
+        expect(result).toBe("full")
+      },
+    })
+  })
+
+  test("returns 'full' when overflow and rollingAttempted is true (emergency fallback)", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 100_000, output: 32_000 })
+        const tokens = { input: 60_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
+        const result = await SessionCompaction.getOverflowStrategy({ tokens, model, rollingAttempted: true })
+        expect(result).toBe("full")
+      },
+    })
+  })
+})
+
+describe("session.compaction.constants", () => {
+  test("ROLLING_THRESHOLD is 0.85", () => {
+    expect(SessionCompaction.ROLLING_THRESHOLD).toBe(0.85)
+  })
+  test("ROLLING_TARGET is 0.70", () => {
+    expect(SessionCompaction.ROLLING_TARGET).toBe(0.70)
+  })
+})
+
+describe("session.compaction.getRollingSummary", () => {
+  test("returns null when no rolling summary exists", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await Session.create({})
+        const result = await SessionCompaction.getRollingSummary(session.id)
+        expect(result).toBeNull()
+        await Session.remove(session.id)
+      },
+    })
+  })
+
+  test("returns summary text when rolling summary exists", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const session = await Session.create({})
+        // Create a user message first (needed as parent)
+        const userMsg = await Session.updateMessage({
+          id: Identifier.ascending("message"),
+          role: "user",
+          sessionID: session.id,
+          time: { created: Date.now() },
+          agent: "test",
+          model: { providerID: "test", modelID: "test" },
+        })
+        // Create rolling summary assistant message
+        const summaryMsg = await Session.updateMessage({
+          id: Identifier.ascending("message"),
+          role: "assistant",
+          parentID: userMsg.id,
+          sessionID: session.id,
+          mode: "rolling-compaction",
+          agent: "rolling-compaction",
+          summary: true,
+          rolling: true,
+          path: { cwd: tmp.path, root: tmp.path },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: "test",
+          providerID: "test",
+          time: { created: Date.now() },
+        })
+        // Add text part to the summary
+        await Session.updatePart({
+          id: Identifier.ascending("part"),
+          messageID: summaryMsg.id,
+          sessionID: session.id,
+          type: "text",
+          text: "This is the rolling summary content.",
+          time: { start: Date.now(), end: Date.now() },
+        })
+
+        const result = await SessionCompaction.getRollingSummary(session.id)
+        expect(result).toBe("This is the rolling summary content.")
+
+        await Session.remove(session.id)
+      },
+    })
+  })
+})
+
+describe("session.compaction.rollingCompact", () => {
+  test("returns compacted:false when no eligible turns", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        const abort = new AbortController().signal
+        const result = await SessionCompaction.rollingCompact({
+          sessionID: "ses_nonexistent",
+          messages: [],
+          currentTokens: 150_000,
+          targetTokens: 100_000,
+          model,
+          abort,
+        })
+        expect(result.compacted).toBe(false)
+        if (!result.compacted) {
+          expect(result.reason).toContain("no eligible turns")
+        }
+      },
+    })
+  })
+
+  test("returns compacted:false when all turns in protection window", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        const abort = new AbortController().signal
+        // Create 2 turn pairs — both will be in the protection window (last 2)
+        const msgs: MessageV2.WithParts[] = [
+          {
+            info: { role: "user", id: "u1", sessionID: "ses_s1", time: { created: 1 }, agent: "test", model: { providerID: "t", modelID: "t" } } as MessageV2.User,
+            parts: [{ type: "text", text: "hello", id: "p1", sessionID: "ses_s1", messageID: "u1" } as any],
+          },
+          {
+            info: { role: "assistant", id: "a1", sessionID: "ses_s1", parentID: "u1", time: { created: 2 }, mode: "test", agent: "test", path: { cwd: "/", root: "/" }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "t", providerID: "t", finish: "stop" } as MessageV2.Assistant,
+            parts: [{ type: "text", text: "response", id: "p2", sessionID: "ses_s1", messageID: "a1" } as any],
+          },
+          {
+            info: { role: "user", id: "u2", sessionID: "ses_s1", time: { created: 3 }, agent: "test", model: { providerID: "t", modelID: "t" } } as MessageV2.User,
+            parts: [{ type: "text", text: "hello2", id: "p3", sessionID: "ses_s1", messageID: "u2" } as any],
+          },
+          {
+            info: { role: "assistant", id: "a2", sessionID: "ses_s1", parentID: "u2", time: { created: 4 }, mode: "test", agent: "test", path: { cwd: "/", root: "/" }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "t", providerID: "t", finish: "stop" } as MessageV2.Assistant,
+            parts: [{ type: "text", text: "response2", id: "p4", sessionID: "ses_s1", messageID: "a2" } as any],
+          },
+        ]
+        const result = await SessionCompaction.rollingCompact({
+          sessionID: "ses_s1",
+          messages: msgs,
+          currentTokens: 150_000,
+          targetTokens: 100_000,
+          model,
+          abort,
+        })
+        expect(result.compacted).toBe(false)
+        if (!result.compacted) {
+          expect(result.reason).toContain("protection window")
+        }
+      },
+    })
+  })
+
+  test("skips turns where assistant has no finish status", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const model = createModel({ context: 200_000, output: 32_000 })
+        const abort = new AbortController().signal
+        // 3 turn pairs: first has no finish (incomplete), last 2 in protection
+        const msgs: MessageV2.WithParts[] = [
+          {
+            info: { role: "user", id: "u0", sessionID: "ses_s1", time: { created: 0 }, agent: "test", model: { providerID: "t", modelID: "t" } } as MessageV2.User,
+            parts: [{ type: "text", text: "hello0", id: "p0", sessionID: "ses_s1", messageID: "u0" } as any],
+          },
+          {
+            info: { role: "assistant", id: "a0", sessionID: "ses_s1", parentID: "u0", time: { created: 1 }, mode: "test", agent: "test", path: { cwd: "/", root: "/" }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "t", providerID: "t" /* NO finish */ } as MessageV2.Assistant,
+            parts: [{ type: "text", text: "response0", id: "p1", sessionID: "ses_s1", messageID: "a0" } as any],
+          },
+          {
+            info: { role: "user", id: "u1", sessionID: "ses_s1", time: { created: 2 }, agent: "test", model: { providerID: "t", modelID: "t" } } as MessageV2.User,
+            parts: [{ type: "text", text: "hello1", id: "p2", sessionID: "ses_s1", messageID: "u1" } as any],
+          },
+          {
+            info: { role: "assistant", id: "a1", sessionID: "ses_s1", parentID: "u1", time: { created: 3 }, mode: "test", agent: "test", path: { cwd: "/", root: "/" }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "t", providerID: "t", finish: "stop" } as MessageV2.Assistant,
+            parts: [{ type: "text", text: "response1", id: "p3", sessionID: "ses_s1", messageID: "a1" } as any],
+          },
+          {
+            info: { role: "user", id: "u2", sessionID: "ses_s1", time: { created: 4 }, agent: "test", model: { providerID: "t", modelID: "t" } } as MessageV2.User,
+            parts: [{ type: "text", text: "hello2", id: "p4", sessionID: "ses_s1", messageID: "u2" } as any],
+          },
+          {
+            info: { role: "assistant", id: "a2", sessionID: "ses_s1", parentID: "u2", time: { created: 5 }, mode: "test", agent: "test", path: { cwd: "/", root: "/" }, cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }, modelID: "t", providerID: "t", finish: "stop" } as MessageV2.Assistant,
+            parts: [{ type: "text", text: "response2", id: "p5", sessionID: "ses_s1", messageID: "a2" } as any],
+          },
+        ]
+        const result = await SessionCompaction.rollingCompact({
+          sessionID: "ses_s1",
+          messages: msgs,
+          currentTokens: 150_000,
+          targetTokens: 100_000,
+          model,
+          abort,
+        })
+        // Turn u0/a0 skipped (no finish), turns u1/a1 and u2/a2 in protection
+        expect(result.compacted).toBe(false)
+      },
+    })
+  })
 })
