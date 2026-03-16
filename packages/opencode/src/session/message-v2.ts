@@ -368,6 +368,7 @@ export namespace MessageV2 {
     system: z.string().optional(),
     tools: z.record(z.string(), z.boolean()).optional(),
     variant: z.string().optional(),
+    compacted: z.object({ at: z.number(), summaryID: z.string() }).optional(),
   }).meta({
     ref: "UserMessage",
   })
@@ -423,6 +424,7 @@ export namespace MessageV2 {
       root: z.string(),
     }),
     summary: z.boolean().optional(),
+    rolling: z.boolean().optional(),
     cost: z.number(),
     tokens: z.object({
       total: z.number().optional(),
@@ -437,6 +439,7 @@ export namespace MessageV2 {
     structured: z.any().optional(),
     variant: z.string().optional(),
     finish: z.string().optional(),
+    compacted: z.object({ at: z.number(), summaryID: z.string() }).optional(),
   }).meta({
     ref: "AssistantMessage",
   })
@@ -821,7 +824,20 @@ export namespace MessageV2 {
         completed.add(msg.info.parentID)
     }
     result.reverse()
-    return result
+
+    // Rolling window support: filter out compacted messages and reposition summary
+    const filtered = result.filter((msg) => !msg.info.compacted)
+    const summaryIdx = filtered.findIndex(
+      (msg) =>
+        msg.info.role === "assistant" &&
+        (msg.info as Assistant).rolling === true &&
+        (msg.info as Assistant).summary === true,
+    )
+    if (summaryIdx > 0) {
+      const [summary] = filtered.splice(summaryIdx, 1)
+      filtered.unshift(summary)
+    }
+    return filtered
   }
 
   export function fromError(e: unknown, ctx: { providerID: string }) {

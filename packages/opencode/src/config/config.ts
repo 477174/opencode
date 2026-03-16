@@ -1159,6 +1159,9 @@ export namespace Config {
             .min(0)
             .optional()
             .describe("Token buffer for compaction. Leaves enough window to avoid overflow during compaction."),
+          mode: z.enum(["rolling", "full"]).optional().describe("Compaction mode: rolling (incremental) or full (legacy). Default: rolling"),
+          threshold: z.number().min(0).max(1).optional().describe("Fraction of usable context that triggers rolling compaction. Default: 0.85 (85%)"),
+          target: z.number().min(0).max(1).optional().describe("Target fraction of usable context after rolling compaction. Default: 0.70 (70%)"),
         })
         .optional(),
       experimental: z
