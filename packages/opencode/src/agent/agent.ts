@@ -10,6 +10,7 @@ import { ProviderTransform } from "../provider/transform"
 
 import PROMPT_GENERATE from "./generate.txt"
 import PROMPT_COMPACTION from "./prompt/compaction.txt"
+import PROMPT_ROLLING_COMPACTION from "./prompt/rolling-compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
@@ -160,6 +161,21 @@ export namespace Agent {
         native: true,
         hidden: true,
         prompt: PROMPT_COMPACTION,
+        permission: PermissionNext.merge(
+          defaults,
+          PermissionNext.fromConfig({
+            "*": "deny",
+          }),
+          user,
+        ),
+        options: {},
+      },
+      "rolling-compaction": {
+        name: "rolling-compaction",
+        mode: "primary",
+        native: true,
+        hidden: true,
+        prompt: PROMPT_ROLLING_COMPACTION,
         permission: PermissionNext.merge(
           defaults,
           PermissionNext.fromConfig({
