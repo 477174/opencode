@@ -12,6 +12,7 @@ import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
+import { TokenCounter } from "./token-counter"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
 import { ProviderTransform } from "../provider/transform"
@@ -545,6 +546,27 @@ export namespace SessionPrompt {
         lastFinished.summary !== true &&
         (await SessionCompaction.isOverflow({ tokens: lastFinished.tokens, model }))
       ) {
+        const overflowTokenCount =
+          lastFinished.tokens.total ||
+          lastFinished.tokens.input +
+            lastFinished.tokens.output +
+            lastFinished.tokens.cache.read +
+            lastFinished.tokens.cache.write
+        const decision = await SessionCompaction.shouldRollingCompact({ tokenCount: overflowTokenCount, model })
+        if (decision.needed) {
+          const rollingResult = await SessionCompaction.rollingCompact({
+            sessionID,
+            messages: msgs,
+            currentTokens: decision.currentTokens,
+            targetTokens: decision.targetTokens,
+            model,
+            abort,
+          })
+          if (rollingResult.compacted) {
+            msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+            continue
+          }
+        }
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
@@ -655,6 +677,36 @@ export namespace SessionPrompt {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
 
+      // --- Rolling Window Compaction Check ---
+      const preCheckModelMessages = MessageV2.toModelMessages(msgs, model)
+      const preCheckTokenCount = await TokenCounter.count({
+        model,
+        system: system.map((s) => ({ role: "system" as const, content: s })),
+        messages: preCheckModelMessages,
+      })
+      const compactionDecision = await SessionCompaction.shouldRollingCompact({
+        tokenCount: preCheckTokenCount,
+        model,
+      })
+      if (compactionDecision.needed) {
+        log.info("rolling compaction triggered", {
+          currentTokens: compactionDecision.currentTokens,
+          targetTokens: compactionDecision.targetTokens,
+        })
+        const compactResult = await SessionCompaction.rollingCompact({
+          sessionID,
+          messages: msgs,
+          currentTokens: compactionDecision.currentTokens,
+          targetTokens: compactionDecision.targetTokens,
+          model,
+          abort,
+        })
+        if (compactResult.compacted) {
+          msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+        }
+      }
+      // --- End Rolling Compaction Check ---
+
       const result = await processor.process({
         user: lastUser,
         agent,
@@ -703,13 +755,40 @@ export namespace SessionPrompt {
 
       if (result === "stop") break
       if (result === "compact") {
-        await SessionCompaction.create({
-          sessionID,
-          agent: lastUser.agent,
-          model: lastUser.model,
-          auto: true,
-          overflow: !processor.message.finish,
+        const reactiveTokenCount =
+          processor.message.tokens.total ||
+          processor.message.tokens.input +
+            processor.message.tokens.output +
+            processor.message.tokens.cache.read +
+            processor.message.tokens.cache.write
+        const reactiveDecision = await SessionCompaction.shouldRollingCompact({
+          tokenCount: reactiveTokenCount,
+          model,
         })
+        let rolledOk = false
+        if (reactiveDecision.needed) {
+          const rollingResult = await SessionCompaction.rollingCompact({
+            sessionID,
+            messages: msgs,
+            currentTokens: reactiveDecision.currentTokens,
+            targetTokens: reactiveDecision.targetTokens,
+            model,
+            abort,
+          })
+          rolledOk = rollingResult.compacted
+          if (rolledOk) {
+            msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+          }
+        }
+        if (!rolledOk) {
+          await SessionCompaction.create({
+            sessionID,
+            agent: lastUser.agent,
+            model: lastUser.model,
+            auto: true,
+            overflow: !processor.message.finish,
+          })
+        }
       }
       continue
     }
