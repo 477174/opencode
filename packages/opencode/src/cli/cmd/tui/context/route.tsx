@@ -29,6 +29,7 @@ for (const sig of ["exit", "SIGINT", "SIGTERM", "SIGHUP"] as const) {
 export type HomeRoute = {
   type: "home"
   initialPrompt?: PromptInfo
+  workspaceID?: string
 }
 
 export type SessionRoute = {

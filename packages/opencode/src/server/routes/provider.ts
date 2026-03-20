@@ -6,6 +6,7 @@ import { Provider } from "../../provider/provider"
 import { ModelsDev } from "../../provider/models"
 import { ProviderAuth } from "../../provider/auth"
 import { Auth } from "../../auth"
+import { ProviderID } from "../../provider/schema"
 import { mapValues } from "remeda"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
@@ -149,7 +150,7 @@ export const ProviderRoutes = lazy(() =>
       validator(
         "param",
         z.object({
-          providerID: z.string().meta({ description: "Provider ID" }),
+          providerID: ProviderID.zod.meta({ description: "Provider ID" }),
         }),
       ),
       validator(
@@ -157,15 +158,17 @@ export const ProviderRoutes = lazy(() =>
         z.object({
           method: z.number().meta({ description: "Auth method index" }),
           authKey: z.string().optional().meta({ description: "Target auth key for multi-account" }),
+          inputs: z.record(z.string(), z.string()).optional().meta({ description: "Prompt inputs" }),
         }),
       ),
       async (c) => {
         const providerID = c.req.valid("param").providerID
-        const { method, authKey } = c.req.valid("json")
+        const { method, authKey, inputs } = c.req.valid("json")
         const result = await ProviderAuth.authorize({
           providerID,
           method,
           authKey,
+          inputs,
         })
         return c.json(result)
       },
@@ -191,7 +194,7 @@ export const ProviderRoutes = lazy(() =>
       validator(
         "param",
         z.object({
-          providerID: z.string().meta({ description: "Provider ID" }),
+          providerID: ProviderID.zod.meta({ description: "Provider ID" }),
         }),
       ),
       validator(

@@ -1,5 +1,5 @@
-import { Instance } from "@/project/instance"
 import type { MiddlewareHandler } from "hono"
+import { Flag } from "../flag/flag"
 import { Installation } from "../installation"
 import { getAdaptor } from "./adaptors"
 import { Workspace } from "./workspace"
@@ -44,8 +44,8 @@ export const WorkspaceRouterMiddleware: MiddlewareHandler = async (c, next) => {
   if (!workspace) return next()
 
   // Allow worktree type workspaces to always route
-  // For other types, only route in development (local installations)
-  if (workspace.type !== "worktree" && !Installation.isLocal()) {
+  // For other types, only route if experimental workspaces flag is set or in development
+  if (workspace.type !== "worktree" && !Flag.OPENCODE_EXPERIMENTAL_WORKSPACES && !Installation.isLocal()) {
     return next()
   }
 

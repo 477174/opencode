@@ -1,10 +1,10 @@
-import { $ } from "bun"
 import { platform, release } from "os"
 import clipboardy from "clipboardy"
 import { lazy } from "../../../../util/lazy.js"
 import { tmpdir } from "os"
 import path from "path"
 import { existsSync } from "fs"
+import fs from "fs/promises"
 import { Filesystem } from "../../../../util/filesystem"
 import { Process } from "../../../../util/process"
 import { which } from "../../../../util/which"
@@ -62,14 +62,27 @@ export namespace Clipboard {
     if (os === "darwin") {
       const tmpfile = path.join(tmpdir(), "opencode-clipboard.png")
       try {
-        await $`osascript -e 'set imageData to the clipboard as "PNGf"' -e 'set fileRef to open for access POSIX file "${tmpfile}" with write permission' -e 'set eof fileRef to 0' -e 'write imageData to fileRef' -e 'close access fileRef'`
-          .nothrow()
-          .quiet()
+        await Process.run(
+          [
+            "osascript",
+            "-e",
+            'set imageData to the clipboard as "PNGf"',
+            "-e",
+            `set fileRef to open for access POSIX file "${tmpfile}" with write permission`,
+            "-e",
+            "set eof fileRef to 0",
+            "-e",
+            "write imageData to fileRef",
+            "-e",
+            "close access fileRef",
+          ],
+          { nothrow: true },
+        )
         const buffer = await Filesystem.readBytes(tmpfile)
         return { data: buffer.toString("base64"), mime: "image/png" }
       } catch {
       } finally {
-        await $`rm -f "${tmpfile}"`.nothrow().quiet()
+        await fs.rm(tmpfile, { force: true }).catch(() => {})
       }
     }
 
@@ -77,9 +90,11 @@ export namespace Clipboard {
     if (os === "win32") {
       const script =
         "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [System.Convert]::ToBase64String($ms.ToArray()) }"
-      const base64 = await $`powershell.exe -NonInteractive -NoProfile -command "${script}"`.nothrow().text()
-      if (base64) {
-        const imageBuffer = Buffer.from(base64.trim(), "base64")
+      const base64 = await Process.text(["powershell.exe", "-NonInteractive", "-NoProfile", "-command", script], {
+        nothrow: true,
+      })
+      if (base64.text) {
+        const imageBuffer = Buffer.from(base64.text.trim(), "base64")
         if (imageBuffer.length > 0) {
           return { data: imageBuffer.toString("base64"), mime: "image/png" }
         }
@@ -93,7 +108,8 @@ export namespace Clipboard {
       if (wlPasteAvailable) {
         const runtimeDir = wslgRuntimeDir()
         const wlEnv = runtimeDir ? { ...process.env, XDG_RUNTIME_DIR: runtimeDir } : process.env
-        const types = await $`wl-paste --list-types`.env(wlEnv).nothrow().quiet().text()
+        const wayland = await Process.run(["wl-paste", "--list-types"], { nothrow: true, env: wlEnv as Record<string, string> })
+        const types = Buffer.from(wayland.stdout).toString()
         if (types) {
           const available = types
             .split("\n")
@@ -101,35 +117,36 @@ export namespace Clipboard {
             .filter(Boolean)
           for (const mime of mimePriority) {
             if (available.includes(mime)) {
-              const data = await $`wl-paste -t ${mime}`.env(wlEnv).nothrow().quiet().arrayBuffer()
-              if (data && data.byteLength > 0) {
+              const data = await Process.run(["wl-paste", "-t", mime], { nothrow: true, env: wlEnv as Record<string, string> })
+              if (data && data.stdout.byteLength > 0) {
                 if (mime === "image/bmp") {
-                  const converted = await convertBmpToPng(Buffer.from(data))
+                  const converted = await convertBmpToPng(Buffer.from(data.stdout))
                   if (converted) return { data: converted.toString("base64"), mime: "image/png" }
                   continue
                 }
-                return { data: Buffer.from(data).toString("base64"), mime }
+                return { data: Buffer.from(data.stdout).toString("base64"), mime }
               }
             }
           }
         }
       } else if (which("xclip")) {
-        const targets = await $`xclip -selection clipboard -t TARGETS -o`.nothrow().quiet().text()
-        if (targets) {
-          const available = targets
+        const targets = await Process.run(["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"], { nothrow: true })
+        const targetsText = Buffer.from(targets.stdout).toString()
+        if (targetsText) {
+          const available = targetsText
             .split("\n")
             .map((x) => x.trim())
             .filter(Boolean)
           for (const mime of mimePriority) {
             if (available.includes(mime)) {
-              const data = await $`xclip -selection clipboard -t ${mime} -o`.nothrow().quiet().arrayBuffer()
-              if (data && data.byteLength > 0) {
+              const data = await Process.run(["xclip", "-selection", "clipboard", "-t", mime, "-o"], { nothrow: true })
+              if (data && data.stdout.byteLength > 0) {
                 if (mime === "image/bmp") {
-                  const converted = await convertBmpToPng(Buffer.from(data))
+                  const converted = await convertBmpToPng(Buffer.from(data.stdout))
                   if (converted) return { data: converted.toString("base64"), mime: "image/png" }
                   continue
                 }
-                return { data: Buffer.from(data).toString("base64"), mime }
+                return { data: Buffer.from(data.stdout).toString("base64"), mime }
               }
             }
           }
@@ -150,7 +167,7 @@ export namespace Clipboard {
       console.log("clipboard: using osascript")
       return async (text: string) => {
         const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
-        await $`osascript -e 'set the clipboard to "${escaped}"'`.nothrow().quiet()
+        await Process.run(["osascript", "-e", `set the clipboard to "${escaped}"`], { nothrow: true })
       }
     }
 

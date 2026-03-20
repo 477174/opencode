@@ -51,7 +51,7 @@ const migrations = await Promise.all(
           Number(match[6]),
         )
       : 0
-    return { sql, timestamp }
+    return { sql, timestamp, name }
   }),
 )
 console.log(`Loaded ${migrations.length} migrations`)
@@ -107,6 +107,10 @@ const allTargets: {
     os: "darwin",
     arch: "x64",
     avx2: false,
+  },
+  {
+    os: "win32",
+    arch: "arm64",
   },
   {
     os: "win32",
@@ -174,7 +178,6 @@ for (const item of targets) {
     conditions: ["browser"],
     tsconfig: "./tsconfig.json",
     plugins: [solidPlugin],
-    sourcemap: "external",
     compile: {
       autoloadBunfig: false,
       autoloadDotenv: false,
