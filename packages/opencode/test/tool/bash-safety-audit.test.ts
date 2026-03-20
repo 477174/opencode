@@ -3,7 +3,8 @@ import { BashTool, BashSafetyError } from "../../src/tool/bash"
 import { BashSafety } from "../../src/tool/bash-safety"
 import { Instance } from "../../src/project/instance"
 import { tmpdir } from "../fixture/fixture"
-import type { PermissionNext } from "../../src/permission/next"
+import type { PermissionNext } from "../../src/permission"
+import { SessionID, MessageID } from "../../src/session/schema"
 
 interface AskRequest {
   permission: string
@@ -14,8 +15,8 @@ interface AskRequest {
 
 function ctx(requests: AskRequest[]) {
   return {
-    sessionID: "test",
-    messageID: "",
+    sessionID: SessionID.make("test"),
+    messageID: MessageID.make(""),
     callID: "",
     agent: "build",
     abort: AbortSignal.any([]),
