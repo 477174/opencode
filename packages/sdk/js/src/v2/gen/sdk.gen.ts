@@ -3051,7 +3051,7 @@ export class Event extends HeyApiClient {
   }
 }
 
-export class Auth2 extends HeyApiClient {
+export class Auth3 extends HeyApiClient {
   /**
    * Remove MCP OAuth
    *
