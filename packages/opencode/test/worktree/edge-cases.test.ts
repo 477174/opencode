@@ -4,6 +4,7 @@ import fs from "fs/promises"
 import path from "path"
 import { GlobalBus } from "../../src/bus/global"
 import { Workspace } from "../../src/control-plane/workspace"
+import { WorkspaceID } from "../../src/control-plane/schema"
 import { WorkspaceTable } from "../../src/control-plane/workspace.sql"
 import { Identifier } from "../../src/id/id"
 import { Instance } from "../../src/project/instance"
@@ -139,7 +140,7 @@ describe("worktree edge cases", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        const id = Identifier.ascending("workspace")
+        const id = WorkspaceID.make(Identifier.ascending("workspace"))
         const dir = path.join(tmp.path, "missing-worktree")
         Database.use((db) => {
           db.insert(WorkspaceTable)

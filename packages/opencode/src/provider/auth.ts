@@ -1,6 +1,7 @@
 import type { AuthOuathResult } from "@opencode-ai/plugin"
 import { NamedError } from "@opencode-ai/util/error"
-import * as Auth from "@/auth/effect"
+import * as AuthEffect from "@/auth/effect"
+import { Auth } from "@/auth"
 import { runPromiseInstance } from "@/effect/runtime"
 import { fn } from "@/util/fn"
 import { ProviderID } from "./schema"
@@ -85,7 +86,7 @@ export namespace ProviderAuth {
   )
 
   export type Error =
-    | Auth.AuthError
+    | AuthEffect.AuthError
     | InstanceType<typeof OauthMissing>
     | InstanceType<typeof OauthCodeMissing>
     | InstanceType<typeof OauthCallbackFailed>
@@ -107,7 +108,7 @@ export namespace ProviderAuth {
   export const layer = Layer.effect(
     Service,
     Effect.gen(function* () {
-      const auth = yield* Auth.AuthEffect.Service
+      const auth = yield* AuthEffect.AuthEffect.Service
       const hooks = yield* Effect.promise(async () => {
         const mod = await import("../plugin")
         const plugins = await mod.Plugin.list()
@@ -218,7 +219,7 @@ export namespace ProviderAuth {
     }),
   )
 
-  export const defaultLayer = layer.pipe(Layer.provide(Auth.AuthEffect.layer))
+  export const defaultLayer = layer.pipe(Layer.provide(AuthEffect.AuthEffect.layer))
 
   export async function methods() {
     return runPromiseInstance(Service.use((svc) => svc.methods()))
@@ -251,14 +252,10 @@ export namespace ProviderAuth {
       authKey: z.string().optional(),
     }),
     async (input) => {
-      return runPromiseInstance(
-        Auth.AuthEffect.Service.use((auth) =>
-          auth.set(input.authKey ?? input.providerID, {
-            type: "api",
-            key: input.key,
-          }),
-        ),
-      )
+      return Auth.set(input.authKey ?? input.providerID, {
+        type: "api",
+        key: input.key,
+      })
     },
   )
 }

@@ -273,45 +273,35 @@ export namespace Worktree {
   export async function resolveDefaultBranch(cwd: string, remote?: string): Promise<string> {
     const picked = remote
       ? remote
-      : await $`git remote`
-          .quiet()
-          .nothrow()
-          .cwd(cwd)
-          .then((result) => {
-            if (result.exitCode !== 0) return ""
-            const remotes = outputText(result.stdout)
-              .split("\n")
-              .map((line) => line.trim())
-              .filter(Boolean)
-            return remotes.includes("origin")
-              ? "origin"
-              : remotes.length === 1
-                ? remotes[0]
-                : remotes.includes("upstream")
-                  ? "upstream"
-                  : ""
-          })
+      : await git(["remote"], { cwd }).then((result) => {
+          if (result.exitCode !== 0) return ""
+          const remotes = outputText(result.stdout)
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+          return remotes.includes("origin")
+            ? "origin"
+            : remotes.length === 1
+              ? remotes[0]
+              : remotes.includes("upstream")
+                ? "upstream"
+                : ""
+        })
 
     const fromRemote = picked
-      ? await $`git symbolic-ref refs/remotes/${picked}/HEAD`
-          .quiet()
-          .nothrow()
-          .cwd(cwd)
-          .then((result) => {
-            if (result.exitCode !== 0) return ""
-            const ref = outputText(result.stdout)
-            const target = ref ? ref.replace(/^refs\/remotes\//, "") : ""
-            return target.startsWith(`${picked}/`) ? target.slice(`${picked}/`.length) : ""
-          })
+      ? await git(["symbolic-ref", `refs/remotes/${picked}/HEAD`], { cwd }).then((result) => {
+          if (result.exitCode !== 0) return ""
+          const ref = outputText(result.stdout)
+          const target = ref ? ref.replace(/^refs\/remotes\//, "") : ""
+          return target.startsWith(`${picked}/`) ? target.slice(`${picked}/`.length) : ""
+        })
       : ""
 
     if (fromRemote) return fromRemote
 
-    const init = await $`git config --get init.defaultBranch`
-      .quiet()
-      .nothrow()
-      .cwd(cwd)
-      .then((result) => (result.exitCode === 0 ? outputText(result.stdout) : ""))
+    const init = await git(["config", "--get", "init.defaultBranch"], { cwd }).then((result) =>
+      result.exitCode === 0 ? outputText(result.stdout) : "",
+    )
 
     if (init) return init
 
@@ -496,7 +486,7 @@ export namespace Worktree {
     }
 
     const dir = await canonical(directory)
-    const status = await $`git status --porcelain`.quiet().nothrow().cwd(dir)
+    const status = await git(["status", "--porcelain"], { cwd: dir })
     if (status.exitCode !== 0) {
       throw new RemoveFailedError({ message: errorText(status) || "Failed to read git status" })
     }
@@ -506,7 +496,7 @@ export namespace Worktree {
       .map((line) => line.trim())
       .filter(Boolean).length
 
-    const rev = await $`git log --oneline --not --remotes`.quiet().nothrow().cwd(dir)
+    const rev = await git(["log", "--oneline", "--not", "--remotes"], { cwd: dir })
     if (rev.exitCode !== 0) {
       throw new RemoveFailedError({ message: errorText(rev) || "Failed to read git log" })
     }

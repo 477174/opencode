@@ -238,7 +238,7 @@ export namespace Session {
   )
 
   const CreateWithWorktreeInput = z.object({
-    projectID: z.string(),
+    projectID: ProjectID.zod,
     directory: z.string(),
     title: z.string().optional(),
   })

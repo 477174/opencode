@@ -283,7 +283,7 @@ export const ProviderRoutes = lazy(() =>
       validator(
         "param",
         z.object({
-          providerID: z.string().meta({ description: "Provider ID" }),
+          providerID: ProviderID.zod.meta({ description: "Provider ID" }),
         }),
       ),
       validator(
@@ -297,7 +297,7 @@ export const ProviderRoutes = lazy(() =>
         const { providerID } = c.req.valid("param")
         const { apiKey, label } = c.req.valid("json")
         const authKey = await Auth.nextKey(providerID)
-        await ProviderAuth.api({ providerID, key: apiKey, authKey })
+        await ProviderAuth.api({ providerID: ProviderID.make(providerID), key: apiKey, authKey })
         return c.json({ key: authKey, label: label ?? `Account #${authKey.split(":")[1] ?? "1"}` })
       },
     )

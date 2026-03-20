@@ -17,6 +17,7 @@ import { PermissionNext } from "@/permission"
 import { Question } from "@/question"
 import { PartID } from "./schema"
 import type { SessionID, MessageID } from "./schema"
+import { Identifier } from "@/id/id"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -24,14 +25,14 @@ export namespace SessionProcessor {
 
   async function injectSwitchNotification(
     msg: MessageV2.Assistant,
-    sessionID: string,
+    sessionID: SessionID,
     pool: NonNullable<Awaited<ReturnType<typeof Provider.getPool>>>,
   ) {
     const stats = pool.stats()
     const states = pool.states()
     const active = states[stats.activeIndex]
     await Session.updatePart({
-      id: Identifier.ascending("part"),
+      id: PartID.make(Identifier.ascending("part")),
       messageID: msg.id,
       sessionID,
       type: "text",
