@@ -508,35 +508,36 @@ export function Session() {
       slash: {
         name: "undo",
       },
-      onSelect: async (dialog) => {
-        const status = sync.data.session_status?.[route.sessionID]
-        if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
-        const revert = session()?.revert?.messageID
-        const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
-        if (!message) return
-        sdk.client.session
-          .revert({
-            sessionID: route.sessionID,
-            messageID: message.id,
-          })
-          .then(() => {
-            toBottom()
-          })
-        const parts = sync.data.part[message.id]
-        prompt.set(
-          parts.reduce(
-            (agg, part) => {
-              if (part.type === "text") {
-                if (!part.synthetic) agg.input += part.text
-              }
-              if (part.type === "file") agg.parts.push(part)
-              return agg
-            },
-            { input: "", parts: [] as PromptInfo["parts"] },
-          ),
-        )
-        dialog.clear()
-      },
+       onSelect: async (dialog) => {
+         const status = sync.data.session_status?.[route.sessionID]
+         if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
+         const revert = session()?.revert?.messageID
+         const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
+         if (!message) return
+         try {
+           await sdk.client.session.revert({
+             sessionID: route.sessionID,
+             messageID: message.id,
+           }, { throwOnError: true })
+           toBottom()
+           const parts = sync.data.part[message.id]
+           prompt.set(
+             parts.reduce(
+               (agg, part) => {
+                 if (part.type === "text") {
+                   if (!part.synthetic) agg.input += part.text
+                 }
+                 if (part.type === "file") agg.parts.push(part)
+                 return agg
+               },
+               { input: "", parts: [] as PromptInfo["parts"] },
+             ),
+           )
+         } catch {
+           toast.show({ message: "Failed to undo", variant: "error" })
+         }
+         dialog.clear()
+       },
     },
     {
       title: "Redo",
@@ -547,23 +548,32 @@ export function Session() {
       slash: {
         name: "redo",
       },
-      onSelect: (dialog) => {
-        dialog.clear()
-        const messageID = session()?.revert?.messageID
-        if (!messageID) return
-        const message = messages().find((x) => x.role === "user" && x.id > messageID)
-        if (!message) {
-          sdk.client.session.unrevert({
-            sessionID: route.sessionID,
-          })
-          prompt.set({ input: "", parts: [] })
-          return
-        }
-        sdk.client.session.revert({
-          sessionID: route.sessionID,
-          messageID: message.id,
-        })
-      },
+       onSelect: async (dialog) => {
+         const messageID = session()?.revert?.messageID
+         if (!messageID) return
+         const message = messages().find((x) => x.role === "user" && x.id > messageID)
+         if (!message) {
+           try {
+             await sdk.client.session.unrevert({
+               sessionID: route.sessionID,
+             }, { throwOnError: true })
+             prompt.set({ input: "", parts: [] })
+           } catch {
+             toast.show({ message: "Failed to redo", variant: "error" })
+           }
+           dialog.clear()
+           return
+         }
+         try {
+           await sdk.client.session.revert({
+             sessionID: route.sessionID,
+             messageID: message.id,
+           }, { throwOnError: true })
+         } catch {
+           toast.show({ message: "Failed to redo", variant: "error" })
+         }
+         dialog.clear()
+       },
     },
     {
       title: sidebarVisible() ? "Hide sidebar" : "Show sidebar",
