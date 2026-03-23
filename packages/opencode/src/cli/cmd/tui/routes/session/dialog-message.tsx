@@ -1,4 +1,5 @@
 import { createMemo } from "solid-js"
+import { reconcile } from "solid-js/store"
 import { useSync } from "@tui/context/sync"
 import { DialogSelect } from "@tui/ui/dialog-select"
 import { useSDK } from "@tui/context/sdk"
@@ -34,31 +35,37 @@ export function DialogMessage(props: {
             const status = sync.data.session_status?.[props.sessionID]
             if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: props.sessionID }).catch(() => {})
 
-            try {
-              await sdk.client.session.revert({
-                sessionID: props.sessionID,
-                messageID: msg.id,
-              }, { throwOnError: true })
-
-              if (props.setPrompt) {
-                const parts = sync.data.part[msg.id]
-                const promptInfo = parts.reduce(
-                  (agg, part) => {
-                    if (part.type === "text") {
-                      if (!part.synthetic) agg.input += part.text
-                    }
-                    if (part.type === "file") agg.parts.push(strip(part))
-                    return agg
-                  },
-                  { input: "", parts: [] as PromptInfo["parts"] },
-                )
-                props.setPrompt(promptInfo)
-              }
-            } catch {
-              toast.show({ message: "Failed to revert", variant: "error" })
+            if (props.setPrompt) {
+              const parts = sync.data.part[msg.id]
+              const promptInfo = parts.reduce(
+                (agg, part) => {
+                  if (part.type === "text") {
+                    if (!part.synthetic) agg.input += part.text
+                  }
+                  if (part.type === "file") agg.parts.push(strip(part))
+                  return agg
+                },
+                { input: "", parts: [] as PromptInfo["parts"] },
+              )
+              props.setPrompt(promptInfo)
             }
-
             dialog.clear()
+
+            sdk.client.session.revert({
+              sessionID: props.sessionID,
+              messageID: msg.id,
+            }).then((result) => {
+              if (result.error) {
+                toast.show({ message: "Failed to revert", variant: "error" })
+                return
+              }
+              if (result.data) {
+                const index = sync.data.session.findIndex((s) => s.id === props.sessionID)
+                if (index >= 0) {
+                  sync.set("session", index, reconcile(result.data))
+                }
+              }
+            })
           },
         },
         {

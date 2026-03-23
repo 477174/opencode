@@ -13,6 +13,7 @@ import {
   useContext,
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
+import { reconcile } from "solid-js/store"
 import path from "path"
 import { useRoute, useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
@@ -514,29 +515,36 @@ export function Session() {
          const revert = session()?.revert?.messageID
          const message = messages().findLast((x) => (!revert || x.id < revert) && x.role === "user")
          if (!message) return
-         try {
-           await sdk.client.session.revert({
-             sessionID: route.sessionID,
-             messageID: message.id,
-           }, { throwOnError: true })
-           toBottom()
-           const parts = sync.data.part[message.id]
-           prompt.set(
-             parts.reduce(
-               (agg, part) => {
-                 if (part.type === "text") {
-                   if (!part.synthetic) agg.input += part.text
-                 }
-                 if (part.type === "file") agg.parts.push(part)
-                 return agg
-               },
-               { input: "", parts: [] as PromptInfo["parts"] },
-             ),
-           )
-         } catch {
-           toast.show({ message: "Failed to undo", variant: "error" })
-         }
+         const parts = sync.data.part[message.id]
+         prompt.set(
+           parts.reduce(
+             (agg, part) => {
+               if (part.type === "text") {
+                 if (!part.synthetic) agg.input += part.text
+               }
+               if (part.type === "file") agg.parts.push(part)
+               return agg
+             },
+             { input: "", parts: [] as PromptInfo["parts"] },
+           ),
+         )
+         toBottom()
          dialog.clear()
+         sdk.client.session.revert({
+           sessionID: route.sessionID,
+           messageID: message.id,
+         }).then((result) => {
+           if (result.error) {
+             toast.show({ message: "Failed to undo", variant: "error" })
+             return
+           }
+           if (result.data) {
+             const index = sync.data.session.findIndex((s) => s.id === route.sessionID)
+             if (index >= 0) {
+               sync.set("session", index, reconcile(result.data))
+             }
+           }
+         })
        },
     },
     {
@@ -552,27 +560,40 @@ export function Session() {
          const messageID = session()?.revert?.messageID
          if (!messageID) return
          const message = messages().find((x) => x.role === "user" && x.id > messageID)
+         dialog.clear()
          if (!message) {
-           try {
-             await sdk.client.session.unrevert({
-               sessionID: route.sessionID,
-             }, { throwOnError: true })
-             prompt.set({ input: "", parts: [] })
-           } catch {
-             toast.show({ message: "Failed to redo", variant: "error" })
-           }
-           dialog.clear()
+           prompt.set({ input: "", parts: [] })
+           sdk.client.session.unrevert({
+             sessionID: route.sessionID,
+           }).then((result) => {
+             if (result.error) {
+               toast.show({ message: "Failed to redo", variant: "error" })
+               return
+             }
+             if (result.data) {
+               const index = sync.data.session.findIndex((s) => s.id === route.sessionID)
+               if (index >= 0) {
+                 sync.set("session", index, reconcile(result.data))
+               }
+             }
+           })
            return
          }
-         try {
-           await sdk.client.session.revert({
-             sessionID: route.sessionID,
-             messageID: message.id,
-           }, { throwOnError: true })
-         } catch {
-           toast.show({ message: "Failed to redo", variant: "error" })
-         }
-         dialog.clear()
+         sdk.client.session.revert({
+           sessionID: route.sessionID,
+           messageID: message.id,
+         }).then((result) => {
+           if (result.error) {
+             toast.show({ message: "Failed to redo", variant: "error" })
+             return
+           }
+           if (result.data) {
+             const index = sync.data.session.findIndex((s) => s.id === route.sessionID)
+             if (index >= 0) {
+               sync.set("session", index, reconcile(result.data))
+             }
+           }
+         })
        },
     },
     {
