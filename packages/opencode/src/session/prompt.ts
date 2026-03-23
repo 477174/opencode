@@ -266,6 +266,9 @@ export namespace SessionPrompt {
       return
     }
     match.abort.abort()
+    for (const cb of match.callbacks) {
+      cb.reject(new Session.BusyError(sessionID))
+    }
     delete s[sessionID]
     SessionStatus.set(sessionID, { type: "idle" })
     return
@@ -286,7 +289,13 @@ export namespace SessionPrompt {
       })
     }
 
-    using _ = defer(() => cancel(sessionID))
+    const myController = state()[sessionID]?.abort
+    using _ = defer(() => {
+      const current = state()[sessionID]
+      if (current && current.abort === myController) {
+        cancel(sessionID)
+      }
+    })
 
     // Structured output state
     // Note: On session resumption, state is reset but outputFormat is preserved
@@ -1714,7 +1723,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     abort.addEventListener("abort", abortHandler, { once: true })
 
     await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        abort.removeEventListener("abort", abortHandler)
+        resolve()
+      }, 5000)
       proc.on("close", () => {
+        clearTimeout(timeout)
         exited = true
         abort.removeEventListener("abort", abortHandler)
         resolve()
