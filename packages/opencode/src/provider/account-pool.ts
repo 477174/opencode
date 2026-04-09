@@ -246,6 +246,8 @@ const EXHAUSTION_PATTERNS = [
   /exceeded.*(?:monthly|daily|weekly)/i,
   /FreeUsageLimitError/i,
   /credits?.?(?:exhausted|depleted|exceeded)/i,
+  /out of extra usage/i,
+  /out of usage/i,
 ]
 
 export const EXHAUSTION_RETRY_AFTER_MS = 300_000

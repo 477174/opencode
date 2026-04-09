@@ -496,6 +496,36 @@ export namespace SessionProcessor {
                     await Session.updateMessage(input.assistantMessage)
                     return "stop"
                   }
+                  // HTTP 400 with usage exhaustion body → treat like 429 (cooldown + switch)
+                  if (
+                    error.data.statusCode === 400 &&
+                    typeof error.data.responseBody === "string" &&
+                    isAccountExhausted(0, error.data.responseBody)
+                  ) {
+                    pool.cooldown(faulted, Date.now() + COOLDOWN_MAX_WAIT_MS)
+                    await Provider.savePoolNow(input.model.providerID)
+
+                    if (switches < maxSwitches) {
+                      await Provider.syncPool(input.model.providerID)
+
+                      if (pool.hasHealthy()) {
+                        switches++
+                        await Provider.rotateAccount(input.model.providerID)
+                        await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                        continue
+                      }
+                    }
+
+                    log.error("all accounts exhausted (400)", { providerID: input.model.providerID })
+                    input.assistantMessage.error = error
+                    Bus.publish(Session.Event.Error, {
+                      sessionID: input.sessionID,
+                      error,
+                    })
+                    input.assistantMessage.time.completed = Date.now()
+                    await Session.updateMessage(input.assistantMessage)
+                    return "stop"
+                  }
                   if (error.data.statusCode === 401 || error.data.statusCode === 403) {
                     pool.disable(faulted)
                     await Provider.savePoolNow(input.model.providerID)
