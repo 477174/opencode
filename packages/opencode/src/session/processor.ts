@@ -9,7 +9,7 @@ import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { Plugin } from "@/plugin"
 import { Provider } from "@/provider/provider"
-import { isAccountExhausted, COOLDOWN_MAX_WAIT_MS } from "@/provider/account-pool"
+import { isAccountExhausted, COOLDOWN_MAX_WAIT_MS, EXHAUSTION_RETRY_AFTER_MS } from "@/provider/account-pool"
 import { LLM } from "./llm"
 import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
@@ -496,13 +496,14 @@ export namespace SessionProcessor {
                     await Session.updateMessage(input.assistantMessage)
                     return "stop"
                   }
-                  // HTTP 400 with usage exhaustion body → treat like 429 (cooldown + switch)
+                  // HTTP 400 with exhaustion body (e.g. "out of extra usage") —
+                  // treat as account exhaustion: cooldown + rotate, same as 429
                   if (
                     error.data.statusCode === 400 &&
                     typeof error.data.responseBody === "string" &&
                     isAccountExhausted(0, error.data.responseBody)
                   ) {
-                    pool.cooldown(faulted, Date.now() + COOLDOWN_MAX_WAIT_MS)
+                    pool.cooldown(faulted, Date.now() + EXHAUSTION_RETRY_AFTER_MS)
                     await Provider.savePoolNow(input.model.providerID)
 
                     if (switches < maxSwitches) {
@@ -514,9 +515,27 @@ export namespace SessionProcessor {
                         await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
                         continue
                       }
+
+                      // Re-enable disabled accounts — they may have recovered
+                      let reenabled = false
+                      for (const s of pool.states()) {
+                        if (s.status === "disabled") {
+                          pool.enable(s.info.index)
+                          reenabled = true
+                        }
+                      }
+                      if (reenabled) {
+                        await Provider.savePoolNow(input.model.providerID)
+                        if (pool.hasHealthy()) {
+                          switches++
+                          await Provider.rotateAccount(input.model.providerID)
+                          await injectSwitchNotification(input.assistantMessage, input.sessionID, pool)
+                          continue
+                        }
+                      }
                     }
 
-                    log.error("all accounts exhausted (400)", { providerID: input.model.providerID })
+                    log.error("all accounts exhausted (billing)", { providerID: input.model.providerID })
                     input.assistantMessage.error = error
                     Bus.publish(Session.Event.Error, {
                       sessionID: input.sessionID,

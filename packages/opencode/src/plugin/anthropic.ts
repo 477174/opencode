@@ -3,15 +3,19 @@ import { APICallError } from "ai"
 import { Log } from "../util/log"
 import { OAUTH_DUMMY_KEY, Auth } from "../auth"
 import { generatePKCE } from "@openauthjs/openauth/pkce"
-import { createHash } from "crypto"
+import { createHash, randomUUID } from "crypto"
 
 const log = Log.create({ service: "plugin.anthropic" })
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const TOOL_PREFIX = "mcp_"
-const CLI_VERSION = "2.1.80"
+const CLI_VERSION = "2.1.107"
 const API_USER_AGENT = `claude-cli/${CLI_VERSION} (external, cli)`
 const BILLING_SALT = "59cf53e54c78"
+
+// Persistent session ID per process (matches Claude Code behavior)
+const SESSION_ID = randomUUID()
+
 
 function firstUserMessageText(messages: Array<{ role: string; content: string | Array<{ type: string; text?: string }> }>): string {
   const msg = messages.find((m) => m.role === "user")
@@ -27,7 +31,7 @@ function firstUserMessageText(messages: Array<{ role: string; content: string | 
 function generateBillingHeader(userText: string): string {
   const sampled = [4, 7, 20].map((i) => userText[i] || "0").join("")
   const hash = createHash("sha256").update(`${BILLING_SALT}${sampled}${CLI_VERSION}`).digest("hex").slice(0, 3)
-  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT ?? "unknown"
+  const entrypoint = process.env.CLAUDE_CODE_ENTRYPOINT ?? "cli"
   return `x-anthropic-billing-header: cc_version=${CLI_VERSION}.${hash}; cc_entrypoint=${entrypoint}; cch=00000;`
 }
 
@@ -97,6 +101,18 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
     auth: {
       provider: "anthropic",
       async loader(getAuth, provider) {
+        // Bypass plugin when routing through an external proxy (e.g. Meridian).
+        // Pass through the env-var API key so OpenCode uses it as a plain
+        // API-key client instead of the OAuth intercept path.
+        if (process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY) {
+          log.info("ANTHROPIC_BASE_URL set — bypassing OAuth plugin", {
+            baseURL: process.env.ANTHROPIC_BASE_URL,
+          })
+          return {
+            apiKey: process.env.ANTHROPIC_API_KEY,
+            baseURL: process.env.ANTHROPIC_BASE_URL,
+          }
+        }
         const auth = await getAuth()
         if (auth.type === "oauth") {
           for (const model of Object.values(provider.models)) {
@@ -164,12 +180,16 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                   const parsed = JSON.parse(body)
                   modelId = parsed.model ?? "unknown"
 
+                  // Inject billing header as first system prompt block (required for Claude 4+ models)
+                  const userText = firstUserMessageText(parsed.messages ?? [])
+                  const billingText = generateBillingHeader(userText)
                   if (!parsed.system) parsed.system = []
                   if (!Array.isArray(parsed.system)) parsed.system = [{ type: "text", text: parsed.system }]
                   parsed.system = parsed.system.filter(
                     (item: { type: string; text?: string }) =>
                       !(item.type === "text" && item.text?.startsWith("x-anthropic-billing-header")),
                   )
+                  parsed.system.unshift({ type: "text", text: billingText })
 
                   // Sanitize system prompt — server blocks "OpenCode" string
                   parsed.system = parsed.system.map((item: { type: string; text?: string }) => {
@@ -181,52 +201,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                     return item
                   })
 
-                  // Anthropic enforces a system prompt token limit (~6K tokens) on Claude Code
-                  // OAuth sessions (detected via the token's client_id). Move overflow content
-                  // from system blocks into the first user message to bypass this restriction.
-                  const CC_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
-                  const kept: typeof parsed.system = []
-                  const overflow: string[] = []
-                  const TOKEN_LIMIT = 5000
-                  let systemChars = 0
-                  for (const block of parsed.system) {
-                    if (block.type !== "text" || !block.text) {
-                      kept.push(block)
-                      continue
-                    }
-                    // If block is small enough, keep in system
-                    if (systemChars + block.text.length <= TOKEN_LIMIT) {
-                      kept.push(block)
-                      systemChars += block.text.length
-                    } else if (block.text.startsWith(CC_PREFIX) && block.text.length > TOKEN_LIMIT) {
-                      // Large block starting with CC prefix — keep only the prefix line in system,
-                      // move the rest to overflow
-                      kept.push({ type: "text", text: CC_PREFIX })
-                      systemChars += CC_PREFIX.length
-                      overflow.push(block.text.slice(CC_PREFIX.length).trim())
-                    } else {
-                      overflow.push(block.text)
-                    }
-                  }
-                  if (overflow.length > 0) {
-                    parsed.system = kept
-                    const overflowText = overflow.join("\n\n")
-                    // Prepend overflow as a system-context user message
-                    if (!parsed.messages) parsed.messages = []
-                    const firstMsg = parsed.messages[0]
-                    if (firstMsg && firstMsg.role === "user") {
-                      // Inject before existing first user message
-                      const content = typeof firstMsg.content === "string" ? firstMsg.content : firstMsg.content
-                      parsed.messages[0] = {
-                        ...firstMsg,
-                        content: typeof content === "string"
-                          ? overflowText + "\n\n" + content
-                          : [{ type: "text", text: overflowText }, ...content],
-                      }
-                    } else {
-                      parsed.messages.unshift({ role: "user", content: overflowText })
-                    }
-                  }
+
 
                   // Add mcp_ prefix to tool definitions
                   if (parsed.tools && Array.isArray(parsed.tools)) {
@@ -258,7 +233,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 }
               }
 
-              // Build headers — exact match with Claude Code 2.1.80 captured traffic
+              // Build headers — aligned with Claude Code 2.1.107
               const headers = new Headers()
               if (input instanceof Request) {
                 input.headers.forEach((value, key) => headers.set(key, value))
@@ -277,7 +252,7 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 }
               }
 
-              // Beta headers — matched from Claude Code 2.1.80 network capture
+              // Beta headers — matched from Claude Code 2.1.107
               const incoming = headers.get("anthropic-beta") || ""
               const existing = incoming.split(",").map((b) => b.trim()).filter(Boolean)
               const required = [
@@ -286,21 +261,23 @@ export async function AnthropicAuthPlugin({ client }: PluginInput): Promise<Hook
                 "context-management-2025-06-27",
                 "prompt-caching-scope-2026-01-05",
                 "claude-code-20250219",
+                "files-api-2025-04-14",
               ]
               // context-1m for 4.6 models — enable via ANTHROPIC_1M_CONTEXT=true (requires Max plan or Extra Usage)
               if (process.env.ANTHROPIC_1M_CONTEXT === "true") {
                 required.push("context-1m-2025-08-07")
               }
-              // Only send betas recognized by Claude Code — unknown SDK-injected
-              // betas (e.g. fine-grained-tool-streaming, effort) can cause rejection
-              const allowed = new Set(required)
-              const merged = [...new Set([...required, ...existing.filter((b) => allowed.has(b))])].join(",")
+              const merged = [...new Set([...required, ...existing])].join(",")
+
 
               headers.set("authorization", `Bearer ${auth.access}`)
               headers.set("anthropic-beta", merged)
               headers.set("anthropic-dangerous-direct-browser-access", "true")
               headers.set("user-agent", API_USER_AGENT)
               headers.set("x-app", "cli")
+              headers.set("x-client-request-id", randomUUID())
+              headers.set("x-claude-code-session-id", SESSION_ID)
+              headers.set("x-environment-runner-version", CLI_VERSION)
               headers.delete("x-api-key")
 
               // Append ?beta=true to /v1/messages requests
