@@ -16,6 +16,11 @@ import { iife } from "@/util/iife"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
+import {
+  PRUNED_TOOL_OUTPUT_NOTICE,
+  CONFABULATION_PATTERN,
+  CONFABULATION_QUARANTINE_NOTICE,
+} from "./constants"
 
 export namespace MessageV2 {
   export function isMedia(mime: string) {
@@ -684,12 +689,23 @@ export namespace MessageV2 {
           parts: [],
         }
         for (const part of msg.parts) {
-          if (part.type === "text")
+          if (part.type === "text") {
+            // Patch 5: quarantine self-reinforcing confabulation.
+            // If a prior assistant turn contains text that imitates tool-call
+            // syntax, replace the body with a clear notice before the model
+            // sees it. Otherwise the model reads its own past output, learns
+            // the pattern, and emits more of the same on the next turn — a
+            // self-reinforcing loop Patch 1/2/3 cannot break since those
+            // patches never rewrite existing text parts.
+            const text = CONFABULATION_PATTERN.test(part.text)
+              ? CONFABULATION_QUARANTINE_NOTICE
+              : part.text
             assistantMessage.parts.push({
               type: "text",
-              text: part.text,
+              text,
               ...(differentModel ? {} : { providerMetadata: part.metadata }),
             })
+          }
           if (part.type === "step-start")
             assistantMessage.parts.push({
               type: "step-start",
@@ -697,8 +713,26 @@ export namespace MessageV2 {
           if (part.type === "tool") {
             toolNames.add(part.tool)
             if (part.state.status === "completed") {
-              const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
-              const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+              // Pruned tool parts: emit as error state instead of a "successful"
+              // call with a cleared sentinel output. Claude treats a completed
+              // call with blank output as something it can reconstruct from
+              // memory, which leads to fabricated tool_use blocks in subsequent
+              // text responses. Emitting error-text short-circuits that path:
+              // the model sees an unusable result and re-runs the tool if it
+              // needs the information.
+              if (part.state.time.compacted) {
+                assistantMessage.parts.push({
+                  type: ("tool-" + part.tool) as `tool-${string}`,
+                  state: "output-error",
+                  toolCallId: part.callID,
+                  input: part.state.input,
+                  errorText: PRUNED_TOOL_OUTPUT_NOTICE,
+                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                })
+                continue
+              }
+              const outputText = part.state.output
+              const attachments = options?.stripMedia ? [] : (part.state.attachments ?? [])
 
               // For providers that don't support media in tool results, extract media files
               // (images, PDFs) to be sent as a separate user message
