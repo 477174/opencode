@@ -36,6 +36,22 @@ function wslgRuntimeDir(): string | undefined {
   return undefined
 }
 
+/** Build env for Wayland tools — injects WAYLAND_DISPLAY and XDG_RUNTIME_DIR when WSLg is available */
+const waylandEnv = lazy((): { env: Record<string, string>; available: boolean } => {
+  const hasDisplay = !!process.env["WAYLAND_DISPLAY"]
+  const runtimeDir = wslgRuntimeDir()
+  if (hasDisplay && !runtimeDir) return { env: process.env as Record<string, string>, available: true }
+  if (!hasDisplay && !runtimeDir) return { env: process.env as Record<string, string>, available: false }
+  return {
+    env: {
+      ...process.env as Record<string, string>,
+      WAYLAND_DISPLAY: process.env["WAYLAND_DISPLAY"] || "wayland-0",
+      XDG_RUNTIME_DIR: runtimeDir!,
+    },
+    available: true,
+  }
+})
+
 /**
  * Writes text to clipboard via OSC 52 escape sequence.
  * This allows clipboard operations to work over SSH by having
@@ -104,11 +120,9 @@ export namespace Clipboard {
     if (os === "linux") {
       const apiMimes = ["image/png", "image/jpeg", "image/webp", "image/gif"]
       const mimePriority = [...apiMimes, "image/bmp"]
-      const wlPasteAvailable = process.env["WAYLAND_DISPLAY"] && which("wl-paste")
-      if (wlPasteAvailable) {
-        const runtimeDir = wslgRuntimeDir()
-        const wlEnv = runtimeDir ? { ...process.env, XDG_RUNTIME_DIR: runtimeDir } : process.env
-        const wayland = await Process.run(["wl-paste", "--list-types"], { nothrow: true, env: wlEnv as Record<string, string> })
+      const wl = waylandEnv()
+      if (wl.available && which("wl-paste")) {
+        const wayland = await Process.run(["wl-paste", "--list-types"], { nothrow: true, env: wl.env })
         const types = Buffer.from(wayland.stdout).toString()
         if (types) {
           const available = types
@@ -117,7 +131,7 @@ export namespace Clipboard {
             .filter(Boolean)
           for (const mime of mimePriority) {
             if (available.includes(mime)) {
-              const data = await Process.run(["wl-paste", "-t", mime], { nothrow: true, env: wlEnv as Record<string, string> })
+              const data = await Process.run(["wl-paste", "-t", mime], { nothrow: true, env: wl.env })
               if (data && data.stdout.byteLength > 0) {
                 if (mime === "image/bmp") {
                   const converted = await convertBmpToPng(Buffer.from(data.stdout))
@@ -172,12 +186,11 @@ export namespace Clipboard {
     }
 
     if (os === "linux") {
-      if (process.env["WAYLAND_DISPLAY"] && which("wl-copy")) {
+      const wl = waylandEnv()
+      if (wl.available && which("wl-copy")) {
         console.log("clipboard: using wl-copy")
-        const runtimeDir = wslgRuntimeDir()
-        const env = runtimeDir ? { XDG_RUNTIME_DIR: runtimeDir } : undefined
         return async (text: string) => {
-          const proc = Process.spawn(["wl-copy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore", env })
+          const proc = Process.spawn(["wl-copy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore", env: wl.env })
           if (!proc.stdin) return
           proc.stdin.write(text)
           proc.stdin.end()
